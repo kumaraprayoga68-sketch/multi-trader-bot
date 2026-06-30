@@ -1,0 +1,5 @@
+.env
+__pycache__/
+*.pyc
+trading_history.json
+odds_snapshot.json
