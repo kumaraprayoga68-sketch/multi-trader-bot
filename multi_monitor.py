@@ -1,14 +1,28 @@
 import requests
 import time
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from trader_screener_v2 import hitung_performa_dari_activity
+from trader_pnl import hitung_net_pnl_final
 from ai_consensus_analyzer import analisis_consensus, print_analisis_consensus
+from order_executor import place_market_buy
 
 # ── CONFIG ─────────────────────────────────────────────────────────────────
 AUTO_PILIH_TRADER  = True   # True = bot pilih trader sendiri, False = pakai DAFTAR_TRADER manual
 JUMLAH_TRADER      = 10     # berapa trader yang mau dimonitor (hasil auto-screening)
-LIMIT_LEADERBOARD  = 30     # berapa banyak trader top yang di-scan dari leaderboard
+LIMIT_LEADERBOARD  = 100    # berapa banyak trader top yang di-scan dari leaderboard
 MIN_REDEEM         = 3      # minimal berapa kali redeem buat dianggap "aktif menang"
+SCAN_WORKERS        = 8     # jumlah thread paralel buat scan performa (jangan kegedean, rawan rate-limit)
+SCAN_RETRY          = 2     # berapa kali retry kalo API kena rate-limit (429) pas scan
+
+# Tahap 2: validasi net PnL beneran (lebih mahal — pagination /activity), makanya
+# cuma dijalanin ke SEBAGIAN kandidat teratas dari tahap 1, bukan semua 100.
+PNL_CHECK_TOP_N     = 25    # berapa kandidat teratas (by redeem) yang divalidasi net PnL-nya
+PNL_SCAN_WORKERS    = 4     # lebih kecil dari SCAN_WORKERS karena tiap call lebih berat (pagination)
+MIN_CLOSED_POSISI   = 5     # minimal sample size (closed positions) biar statistiknya gak ecek-ecek
+MIN_NET_PNL         = 0     # net PnL minimal buat dianggap layak (0 = harus profit, bukan rugi)
+MIN_WIN_RATE_PNL    = 50    # win rate minimal dari closed positions (%)
+CACHE_TTL_MENIT      = 15   # performa_cache expired setelah sekian menit, biar data gak basi
 
 DAFTAR_TRADER_MANUAL = [
     # isi manual di sini kalau AUTO_PILIH_TRADER = False
@@ -50,16 +64,63 @@ def fetch_top_traders(limit=30):
         r = requests.get(url, headers=headers, params=params, timeout=10)
         r.raise_for_status()
         data = r.json()
-        return [{"wallet": t.get("proxyWallet"), "nama": t.get("pseudonym") or t.get("name", "Unknown")}
-                for t in data]
+        hasil = [{"wallet": t.get("proxyWallet"), "nama": t.get("pseudonym") or t.get("name", "Unknown")}
+                  for t in data]
+        if len(hasil) < limit:
+            # API mungkin punya cap sendiri (mis. max 50/100 per request), bukan berarti error
+            log(f"⚠️  Diminta {limit} trader, API cuma balikin {len(hasil)}. "
+                f"Kemungkinan itu limit maksimum dari endpoint-nya.")
+        return hasil
     except Exception as e:
         log(f"❌ Gagal fetch leaderboard: {e}")
         return []
 
 
+def _scan_satu_trader(t):
+    """
+    Fetch performa 1 trader dengan retry kalo kena rate-limit/error.
+    Dipanggil paralel lewat ThreadPoolExecutor.
+    """
+    wallet = t["wallet"]
+    nama   = t["nama"]
+
+    for percobaan in range(SCAN_RETRY + 1):
+        try:
+            perf = hitung_performa_dari_activity(wallet)
+            return perf, nama
+        except Exception as e:
+            if percobaan < SCAN_RETRY:
+                time.sleep(1.5 * (percobaan + 1))  # backoff sebelum retry
+                continue
+            log(f"❌ Gagal scan {nama} ({wallet[:10]}...) setelah retry: {e}")
+            return None, nama
+
+
+def _cek_pnl_satu_trader(t):
+    """
+    Hitung net PnL final (gabungan /positions + /activity REDEEM) buat 1 trader.
+    Dipanggil paralel, dengan retry kalo error/rate-limit.
+    """
+    wallet = t["wallet"]
+    nama   = t.get("nama", wallet[:10])
+
+    for percobaan in range(SCAN_RETRY + 1):
+        try:
+            hasil = hitung_net_pnl_final(wallet)
+            return hasil, t
+        except Exception as e:
+            if percobaan < SCAN_RETRY:
+                time.sleep(1.5 * (percobaan + 1))
+                continue
+            log(f"❌ Gagal cek PnL {nama} ({wallet[:10]}...) setelah retry: {e}")
+            return None, t
+
+
 def auto_pilih_trader():
     """
-    Scan leaderboard, screening pakai redeem history, ambil top N trader terbaik.
+    Scan leaderboard, screening 2 tahap:
+    TAHAP 1 (murah, redeem count) -> narrow down dari LIMIT_LEADERBOARD ke top PNL_CHECK_TOP_N
+    TAHAP 2 (mahal, net PnL real dari /positions + /activity) -> validasi & final selection
     """
     log(f"📋 Auto-scan leaderboard ({LIMIT_LEADERBOARD} trader)...")
     top_traders = fetch_top_traders(limit=LIMIT_LEADERBOARD)
@@ -68,24 +129,83 @@ def auto_pilih_trader():
         log("❌ Gagal fetch leaderboard, pakai daftar manual sebagai fallback")
         return DAFTAR_TRADER_MANUAL
 
+    log(f"🔎 TAHAP 1: Scanning performa {len(top_traders)} trader paralel ({SCAN_WORKERS} worker)...")
+
     kandidat = []
-    for t in top_traders:
-        wallet = t["wallet"]
-        nama   = t["nama"]
+    gagal_scan = 0
 
-        perf = hitung_performa_dari_activity(wallet)
-        if not perf or perf["total_redeem"] < MIN_REDEEM:
-            continue
+    with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as executor:
+        futures = {executor.submit(_scan_satu_trader, t): t for t in top_traders}
+        for future in as_completed(futures):
+            perf, nama = future.result()
+            if not perf:
+                gagal_scan += 1
+                continue
+            if perf["total_redeem"] < MIN_REDEEM:
+                continue
+            perf["nama"] = nama
+            kandidat.append(perf)
 
-        perf["nama"] = nama
-        kandidat.append(perf)
+    if gagal_scan:
+        log(f"⚠️  {gagal_scan} trader gagal di-scan (error/rate-limit), dilewatin.")
 
     kandidat.sort(key=lambda x: x["nilai_redeem"], reverse=True)
-    terpilih = kandidat[:JUMLAH_TRADER]
+    kandidat_untuk_pnl = kandidat[:PNL_CHECK_TOP_N]
 
-    log(f"✅ {len(terpilih)} trader terpilih dari {len(top_traders)} yang di-scan:")
+    log(f"✅ TAHAP 1 selesai: {len(kandidat)} lolos MIN_REDEEM, "
+        f"validasi net PnL buat top {len(kandidat_untuk_pnl)}...")
+
+    if not kandidat_untuk_pnl:
+        log("❌ Gak ada kandidat yang lolos tahap 1. Bot berhenti pilih trader.")
+        return DAFTAR_TRADER_MANUAL
+
+    log(f"🔎 TAHAP 2: Validasi net PnL real ({PNL_SCAN_WORKERS} worker, ini lebih lambat)...")
+
+    terpilih_pnl = []
+    gagal_pnl = 0
+
+    with ThreadPoolExecutor(max_workers=PNL_SCAN_WORKERS) as executor:
+        futures = {executor.submit(_cek_pnl_satu_trader, t): t for t in kandidat_untuk_pnl}
+        for future in as_completed(futures):
+            hasil_pnl, t = future.result()
+            nama = t.get("nama", t["wallet"][:10])
+
+            if not hasil_pnl:
+                gagal_pnl += 1
+                continue
+
+            if hasil_pnl["total_closed"] < MIN_CLOSED_POSISI:
+                log(f"⚠️  {nama} — closed position terlalu sedikit ({hasil_pnl['total_closed']}), skip")
+                continue
+
+            if hasil_pnl["net_pnl"] >= MIN_NET_PNL and hasil_pnl["win_rate"] >= MIN_WIN_RATE_PNL:
+                hasil_pnl["wallet"] = t["wallet"]
+                hasil_pnl["nama"] = nama
+                terpilih_pnl.append(hasil_pnl)
+                log(f"✅ {nama} — net PnL ${hasil_pnl['net_pnl']:,.0f}, "
+                    f"win rate {hasil_pnl['win_rate']:.1f}% ({hasil_pnl['menang']}W/{hasil_pnl['kalah']}L)")
+            else:
+                log(f"❌ {nama} — net PnL ${hasil_pnl['net_pnl']:,.0f}, "
+                    f"win rate {hasil_pnl['win_rate']:.1f}% (gak lolos threshold)")
+
+    if gagal_pnl:
+        log(f"⚠️  {gagal_pnl} trader gagal di-cek PnL (error/rate-limit), dilewatin.")
+
+    terpilih_pnl.sort(key=lambda x: x["net_pnl"], reverse=True)
+    terpilih = terpilih_pnl[:JUMLAH_TRADER]
+
+    if not terpilih:
+        log("⚠️  Gak ada trader yang lolos validasi net PnL. "
+            "Fallback ke hasil tahap 1 (redeem-based) biar bot tetep jalan.")
+        terpilih_fallback = kandidat_untuk_pnl[:JUMLAH_TRADER]
+        for t in terpilih_fallback:
+            log(f"   [fallback] {t['nama']} — {t['total_redeem']} redeem, ${t['nilai_redeem']:,.0f}")
+        return [t["wallet"] for t in terpilih_fallback]
+
+    log(f"✅ {len(terpilih)} trader FINAL terpilih (net PnL validated):")
     for t in terpilih:
-        log(f"   {t['nama']} — {t['total_redeem']} redeem, ${t['nilai_redeem']:,.0f}")
+        log(f"   {t['nama']} — net PnL ${t['net_pnl']:,.0f}, win rate {t['win_rate']:.1f}%, "
+            f"{t['total_closed']} closed positions")
 
     return [t["wallet"] for t in terpilih]
 
@@ -155,14 +275,30 @@ def cek_boleh_bet(jumlah):
 
 
 def get_performa_wallets(wallets):
+    """
+    Ambil performa trader dari cache kalo masih fresh (< CACHE_TTL_MENIT),
+    kalo expired atau belum ada, fetch ulang dari API.
+    """
     hasil = []
+    sekarang = time.time()
+
     for w in wallets:
-        if w not in performa_cache:
+        cached = performa_cache.get(w)
+        masih_fresh = cached and (sekarang - cached["waktu"]) < CACHE_TTL_MENIT * 60
+
+        if not masih_fresh:
             perf = hitung_performa_dari_activity(w)
             if perf:
-                performa_cache[w] = perf
+                performa_cache[w] = {"data": perf, "waktu": sekarang}
+            elif cached:
+                # fetch gagal tapi ada data lama -> mending pakai yang lama daripada kosong
+                log(f"⚠️  Gagal refresh performa {w[:10]}..., pakai cache lama")
+            else:
+                continue
+
         if w in performa_cache:
-            hasil.append(performa_cache[w])
+            hasil.append(performa_cache[w]["data"])
+
     return hasil
 
 
@@ -205,7 +341,25 @@ def eksekusi_consensus(sinyal):
         if SIMULASI_MODE:
             log(f"   [PAPER] Order dicatat ✏️")
         else:
-            log(f"   ⚠️  Live execution belum diimplementasi")
+            # dry_run=SIMULASI_MODE (False di sini) -- tapi order_executor PUNYA gate-nya
+            # sendiri juga (LIVE_TRADING_ENABLED di order_executor.py). Order beneran
+            # cuma jalan kalo DUA-DUANYA sepakat: SIMULASI_MODE=False DI SINI, dan
+            # LIVE_TRADING_ENABLED=True DI order_executor.py. Sengaja double-gate.
+            hasil_order = place_market_buy(
+                condition_id=sinyal["market_id"],
+                outcome_text=sinyal["outcome"],
+                usd_amount=bet_amount,
+                dry_run=SIMULASI_MODE,
+            )
+            status = hasil_order.get("status", "unknown")
+            if status == "success":
+                log(f"   ✅ Order LIVE berhasil dikirim.")
+            elif status == "dry_run":
+                log(f"   🟡 Order gak beneran dikirim (LIVE_TRADING_ENABLED masih False "
+                    f"di order_executor.py). Nyalain manual kalo emang siap live.")
+            else:
+                log(f"   ❌ Order gagal: {hasil_order.get('alasan', 'unknown error')}")
+                loss_sekarang -= bet_amount  # rollback, order gak beneran kejadian
     else:
         log(f"❌ SKIP — AI confidence {confidence}/10 (butuh ≥{MIN_AI_CONFIDENCE})")
 
