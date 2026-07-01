@@ -115,6 +115,70 @@ Jawab HANYA dalam format JSON berikut (tanpa markdown, tanpa backtick):
         }
 
 
+def buat_alasan(deskripsi_sinyal: str, deskripsi_performa: str, skor: float, keputusan: str, konteks_berita: list = None) -> str:
+    """
+    AI CUMA nulis narasi penjelasan -- keputusan (IKUT/SKIP) dan skor UDAH FINAL
+    dari formula matematis di scoring.py, AI gak punya kuasa buat ngubah itu.
+    Ini beda total dari analisis_consensus()/analisis_single_trader() yang AI-nya
+    yang MUTUSIN -- di sini AI cuma "juru bicara" doang.
+
+    konteks_berita (opsional): list headline/snippet dari news_context.py, biar
+    narasinya bisa nyambungin ke kejadian riil kalo ada -- ini CUMA pemanis
+    narasi, GAK ngaruh ke keputusan sama sekali.
+
+    Gagal fetch AI -> fallback ke teks generik (gak nge-block pipeline, keputusan
+    tetep jalan dari formula walau narasinya seadanya).
+    """
+    if not GROQ_API_KEY:
+        return f"Skor {skor}/10 dari formula (win rate + net PnL + sample size). [GROQ_API_KEY kosong, alasan naratif gak tersedia]"
+
+    bagian_berita = ""
+    if konteks_berita:
+        berita_str = "\n".join(f"- {b}" for b in konteks_berita)
+        bagian_berita = f"\n\nBERITA TERKAIT (konteks tambahan, kalo relevan sebut di narasi, kalo enggak relevan abaikan):\n{berita_str}"
+
+    prompt = f"""Kamu asisten yang nulis penjelasan singkat buat keputusan trading yang
+SUDAH DIAMBIL oleh formula matematis (bukan kamu yang mutusin, jangan ubah/pertanyakan
+keputusannya).
+
+{deskripsi_sinyal}
+
+DATA TRACK RECORD:
+{deskripsi_performa}{bagian_berita}
+
+SKOR DARI FORMULA: {skor}/10
+KEPUTUSAN (final, dari formula): {keputusan}
+
+Tugas kamu CUMA nulis alasan singkat (2-3 kalimat) kenapa skor & keputusan ini
+masuk akal berdasarkan data di atas. Pake bahasa yang enak dibaca, jangan cuma
+ulang angka mentah. Kalo ada berita terkait yang relevan, boleh disebut sebagai
+konteks tambahan -- tapi JANGAN jadiin itu alasan utama, track record tetep
+yang paling penting.
+
+Jawab HANYA teks alasannya. Tanpa JSON, tanpa markdown, tanpa preamble kayak
+"Berikut alasannya:"."""
+
+    try:
+        response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": GROQ_MODEL,
+                "max_tokens": 200,
+                "temperature": 0.5,
+                "messages": [{"role": "user", "content": prompt}]
+            },
+            timeout=15
+        )
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        return f"Skor {skor}/10 dari formula. [Gagal generate narasi AI: {e}]"
+
+
 def analisis_single_trader(sinyal: dict, performa_pnl: dict) -> dict:
     """
     Versi khusus SINGLE_TRADER_MODE. BEDA dari analisis_consensus() -- prompt ini
@@ -226,7 +290,7 @@ def print_analisis_consensus(sinyal: dict, hasil: dict):
     print(f"Trader sepakat: {sinyal['jumlah_trader']}")
     print(f"{'─'*60}")
     print(f"Keputusan AI  : {emoji} {keputusan}")
-    print(f"Confidence    : {'⭐'*confidence} ({confidence}/10)")
+    print(f"Confidence    : {'⭐'*int(round(confidence))} ({confidence:.1f}/10)")
     print(f"Alasan        : {alasan}")
     print(f"{'='*60}\n")
 
@@ -245,7 +309,7 @@ def print_analisis_single_trader(sinyal: dict, hasil: dict):
     print(f"Outcome       : {sinyal['outcome']}")
     print(f"{'─'*60}")
     print(f"Keputusan AI  : {emoji} {keputusan}")
-    print(f"Confidence    : {'⭐'*confidence} ({confidence}/10)")
+    print(f"Confidence    : {'⭐'*int(round(confidence))} ({confidence:.1f}/10)")
     print(f"Alasan        : {alasan}")
     print(f"{'='*60}\n")
 
