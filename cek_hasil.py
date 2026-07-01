@@ -64,6 +64,7 @@ last_rescan_time   = 0
 daftar_trader_aktif = []
 sinyal_sudah_dievaluasi = set()  # {(market_id, outcome), ...} -- biar consensus signal yang
                                   # SAMA gak ditanya ulang ke AI tiap cycle selama posisinya masih sama
+jumlah_sinyal_difilter = 0  # counter sinyal yang ke-skip SEBELUM sampe AI (resolve/kejauhan/high-variance)
 performa_pnl_trader_terpilih = {}  # {wallet: hasil_pnl_dict} -- disi pas SINGLE_TRADER_MODE, dari tahap 2 auto_pilih_trader()
 
 
@@ -643,7 +644,8 @@ def print_summary():
     else:
         print(f"Min consensus    : {MIN_CONSENSUS} trader")
     print(f"Sisa budget      : ${sisa:.2f} / ${BUDGET_SAYA}")
-    print(f"Total sinyal     : {len(riwayat_consensus)}")
+    print(f"Sinyal difilter  : {jumlah_sinyal_difilter} (resolve/kejauhan/high-variance, gak sampe AI)")
+    print(f"Total sinyal     : {len(riwayat_consensus)} (yang sampe ke AI)")
     print(f"✅ IKUT          : {n_ikut}")
     print(f"❌ SKIP          : {n_skip}")
     if riwayat_consensus:
@@ -657,6 +659,7 @@ def print_summary():
 
 def main():
     global posisi_per_trader, posisi_sebelumnya, is_first_run, last_summary_time
+    global jumlah_sinyal_difilter
     global last_rescan_time, daftar_trader_aktif
 
     print(f"\n{'='*60}")
@@ -726,14 +729,17 @@ def main():
                 for sinyal in sinyal_list:
                     if is_market_high_variance(sinyal["title"]):
                         log(f"⏭️  SKIP otomatis (high-variance market): {sinyal['title'][:50]}")
+                        jumlah_sinyal_difilter += 1
                         continue
                     if is_market_sudah_resolve(sinyal["market_id"], sinyal["outcome"]):
                         log(f"⏭️  SKIP otomatis (market udah resolve, gak relevan lagi): "
                             f"{sinyal['title'][:50]}")
+                        jumlah_sinyal_difilter += 1
                         continue
                     if is_market_terlalu_jauh(sinyal["market_id"]):
                         log(f"⏭️  SKIP otomatis (resolve >{MAX_HARI_KE_RESOLVE} hari lagi): "
                             f"{sinyal['title'][:50]}")
+                        jumlah_sinyal_difilter += 1
                         continue
                     eksekusi_single_trader(sinyal)
             else:
@@ -749,16 +755,19 @@ def main():
                     if is_market_high_variance(sinyal["title"]):
                         log(f"⏭️  SKIP otomatis (high-variance market): {sinyal['title'][:50]}")
                         sinyal_sudah_dievaluasi.add(kunci)
+                        jumlah_sinyal_difilter += 1
                         continue
                     if is_market_sudah_resolve(sinyal["market_id"], sinyal["outcome"]):
                         log(f"⏭️  SKIP otomatis (market udah resolve, gak relevan lagi): "
                             f"{sinyal['title'][:50]}")
                         sinyal_sudah_dievaluasi.add(kunci)
+                        jumlah_sinyal_difilter += 1
                         continue
                     if is_market_terlalu_jauh(sinyal["market_id"]):
                         log(f"⏭️  SKIP otomatis (resolve >{MAX_HARI_KE_RESOLVE} hari lagi): "
                             f"{sinyal['title'][:50]}")
                         sinyal_sudah_dievaluasi.add(kunci)
+                        jumlah_sinyal_difilter += 1
                         continue
                     eksekusi_consensus(sinyal)
                     sinyal_sudah_dievaluasi.add(kunci)
