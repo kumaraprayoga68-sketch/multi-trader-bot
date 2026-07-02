@@ -14,7 +14,17 @@ pun gak nge-block keputusan).
 """
 
 # ── TUNING PARAMETER ─────────────────────────────────────────────────────────
-SAMPLE_SIZE_PENUH = 30    # closed positions >= ini dianggap "sample size penuh" (confidence 100%)
+# [UBAH 2026-07-02] SAMPLE_SIZE_PENUH: 30 -> 15. Alasan: banyak sinyal ke-SKIP
+# gara-gara trader dengan closed positions dikit (5-10) kena diskon terlalu
+# parah oleh sample_conf = (total_closed/30)^0.5. Contoh kasus: skor akhir
+# 0.26/10 padahal win rate kedua trader di atas 50%, gara-gara sample size-nya
+# kecil. Turun ke 15 = trader dengan ~10-15 closed positions udah dapet
+# confidence mendekati penuh, bukan didiskon separuh lebih. WAJIB divalidasi
+# ulang pake evaluasi_hasil.csv setelah beberapa cycle -- kalau ternyata makin
+# banyak sinyal yang IKUT tapi hasilnya jelek (banyak KALAH), naikin lagi ke
+# 20-25 sebagai kompromi.
+SAMPLE_SIZE_PENUH = 15    # closed positions >= ini dianggap "sample size penuh" (confidence 100%)
+
 WIN_RATE_LANTAI    = 50    # win rate di titik ini = skor 0 (baseline "gak lebih baik dari coin flip")
 WIN_RATE_ATAP       = 100   # win rate di titik ini = skor 10 (sempurna, teoretis)
 BONUS_PER_TRADER_CONSENSUS = 0.3  # bonus skor tiap trader EKSTRA di atas 2 yang sepakat

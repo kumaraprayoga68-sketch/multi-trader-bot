@@ -17,7 +17,7 @@ from news_context import cari_berita_terkait
 NEWS_CONTEXT_ENABLED = True  # True = AI dapet konteks berita pas nulis narasi (scraping DuckDuckGo,
                               # best-effort, gak ngaruh ke keputusan). False = skip, narasi murni dari data.
 
-TEST_MODE_SKIP_FILTER = True  # ⚠️ TESTING DOANG. True = matiin filter pre-AI (high-variance/
+TEST_MODE_SKIP_FILTER = True  # WARNING TESTING DOANG. True = matiin filter pre-AI (high-variance/
                                 # resolved/terlalu-jauh), biar sinyal lolos sampe ke formula+Kelly
                                 # buat liat beneran ada yang IKUT apa enggak. Formula & Kelly TETEP
                                 # jalan normal (masih bisa SKIP kalo track record/harga emang jelek)
@@ -42,7 +42,7 @@ PNL_SCAN_WORKERS    = 4     # lebih kecil dari SCAN_WORKERS karena tiap call leb
 MIN_CLOSED_POSISI   = 5     # minimal sample size (closed positions) biar statistiknya gak ecek-ecek
 MIN_NET_PNL         = 0     # net PnL minimal buat dianggap layak (0 = harus profit, bukan rugi)
 MIN_WIN_RATE_PNL    = 50    # win rate minimal dari closed positions (%)
-LEADERBOARD_WINDOW  = "30d"  # ✅ udah divalidasi ke API: value yang valid cuma "all"/"ALL"/"1d"/"7d"/"30d"
+LEADERBOARD_WINDOW  = "7d"  # udah divalidasi ke API: value yang valid cuma "all"/"ALL"/"1d"/"7d"/"30d"
                               # (BUKAN "day"/"week"/"month" -- itu 400 semua). "30d" ~ 1 bulan.
 CACHE_TTL_MENIT      = 15   # performa_cache expired setelah sekian menit, biar data gak basi
 
@@ -58,7 +58,14 @@ KEYWORD_HIGH_VARIANCE = [
     "spread:", "spread (", "o/u ", "over/under", "exact score", "handicap",
 ]
 MAX_HARI_KE_RESOLVE = 90  # skip market yang resolve-nya lebih dari 90 hari lagi (susah diprediksi jauh2)
-MIN_AI_CONFIDENCE  = 6
+
+# [UBAH 2026-07-02] MIN_AI_CONFIDENCE: 6 -> 5. Alasan: banyak sinyal valid ke-SKIP
+# karena threshold ini digabung sama efek SAMPLE_SIZE_PENUH yang lama (30) di
+# scoring.py bikin skor jarang tembus 6. Setelah SAMPLE_SIZE_PENUH diturunin ke 15,
+# turunin ini juga dikit ke 5 biar efeknya kerasa. JANGAN turun lebih jauh dulu
+# sebelum divalidasi pake evaluasi_hasil.csv -- kalau makin banyak sinyal IKUT tapi
+# hasilnya lebih banyak KALAH, naikin balik ke 6.
+MIN_AI_CONFIDENCE  = 5
 SINGLE_TRADER_MODE  = False  # True = copy 1 trader terbaik aja (skip logic consensus antar-wallet),
                               # trigger begitu dia buka posisi BARU. Bet size proporsional ke confidence AI.
 CHECK_INTERVAL     = 60
@@ -118,11 +125,11 @@ def fetch_top_traders(limit=30):
                   for t in data]
         if len(hasil) < limit:
             # API mungkin punya cap sendiri (mis. max 50/100 per request), bukan berarti error
-            log(f"⚠️  Diminta {limit} trader, API cuma balikin {len(hasil)}. "
+            log(f"WARNING Diminta {limit} trader, API cuma balikin {len(hasil)}. "
                 f"Kemungkinan itu limit maksimum dari endpoint-nya.")
         return hasil
     except Exception as e:
-        log(f"❌ Gagal fetch leaderboard: {e}")
+        log(f"ERROR Gagal fetch leaderboard: {e}")
         return []
 
 
@@ -142,7 +149,7 @@ def _scan_satu_trader(t):
             if percobaan < SCAN_RETRY:
                 time.sleep(1.5 * (percobaan + 1))  # backoff sebelum retry
                 continue
-            log(f"❌ Gagal scan {nama} ({wallet[:10]}...) setelah retry: {e}")
+            log(f"ERROR Gagal scan {nama} ({wallet[:10]}...) setelah retry: {e}")
             return None, nama
 
 
@@ -162,7 +169,7 @@ def _cek_pnl_satu_trader(t):
             if percobaan < SCAN_RETRY:
                 time.sleep(1.5 * (percobaan + 1))
                 continue
-            log(f"❌ Gagal cek PnL {nama} ({wallet[:10]}...) setelah retry: {e}")
+            log(f"ERROR Gagal cek PnL {nama} ({wallet[:10]}...) setelah retry: {e}")
             return None, t
 
 
@@ -172,14 +179,14 @@ def auto_pilih_trader():
     TAHAP 1 (murah, redeem count) -> narrow down dari LIMIT_LEADERBOARD ke top PNL_CHECK_TOP_N
     TAHAP 2 (mahal, net PnL real dari /positions + /activity) -> validasi & final selection
     """
-    log(f"📋 Auto-scan leaderboard ({LIMIT_LEADERBOARD} trader, window={LEADERBOARD_WINDOW})...")
+    log(f"Auto-scan leaderboard ({LIMIT_LEADERBOARD} trader, window={LEADERBOARD_WINDOW})...")
     top_traders = fetch_top_traders(limit=LIMIT_LEADERBOARD)
 
     if not top_traders:
-        log("❌ Gagal fetch leaderboard, pakai daftar manual sebagai fallback")
+        log("ERROR Gagal fetch leaderboard, pakai daftar manual sebagai fallback")
         return DAFTAR_TRADER_MANUAL
 
-    log(f"🔎 TAHAP 1: Scanning performa {len(top_traders)} trader paralel ({SCAN_WORKERS} worker)...")
+    log(f"TAHAP 1: Scanning performa {len(top_traders)} trader paralel ({SCAN_WORKERS} worker)...")
 
     kandidat = []
     gagal_scan = 0
@@ -197,19 +204,19 @@ def auto_pilih_trader():
             kandidat.append(perf)
 
     if gagal_scan:
-        log(f"⚠️  {gagal_scan} trader gagal di-scan (error/rate-limit), dilewatin.")
+        log(f"WARNING {gagal_scan} trader gagal di-scan (error/rate-limit), dilewatin.")
 
     kandidat.sort(key=lambda x: x["nilai_redeem"], reverse=True)
     kandidat_untuk_pnl = kandidat[:PNL_CHECK_TOP_N]
 
-    log(f"✅ TAHAP 1 selesai: {len(kandidat)} lolos MIN_REDEEM, "
+    log(f"TAHAP 1 selesai: {len(kandidat)} lolos MIN_REDEEM, "
         f"validasi net PnL buat top {len(kandidat_untuk_pnl)}...")
 
     if not kandidat_untuk_pnl:
-        log("❌ Gak ada kandidat yang lolos tahap 1. Bot berhenti pilih trader.")
+        log("ERROR Gak ada kandidat yang lolos tahap 1. Bot berhenti pilih trader.")
         return DAFTAR_TRADER_MANUAL
 
-    log(f"🔎 TAHAP 2: Validasi net PnL real ({PNL_SCAN_WORKERS} worker, ini lebih lambat)...")
+    log(f"TAHAP 2: Validasi net PnL real ({PNL_SCAN_WORKERS} worker, ini lebih lambat)...")
 
     terpilih_pnl = []
     gagal_pnl = 0
@@ -225,21 +232,21 @@ def auto_pilih_trader():
                 continue
 
             if hasil_pnl["total_closed"] < MIN_CLOSED_POSISI:
-                log(f"⚠️  {nama} — closed position terlalu sedikit ({hasil_pnl['total_closed']}), skip")
+                log(f"WARNING {nama} — closed position terlalu sedikit ({hasil_pnl['total_closed']}), skip")
                 continue
 
             if hasil_pnl["net_pnl"] >= MIN_NET_PNL and hasil_pnl["win_rate"] >= MIN_WIN_RATE_PNL:
                 hasil_pnl["wallet"] = t["wallet"]
                 hasil_pnl["nama"] = nama
                 terpilih_pnl.append(hasil_pnl)
-                log(f"✅ {nama} — net PnL ${hasil_pnl['net_pnl']:,.0f}, "
+                log(f"OK {nama} — net PnL ${hasil_pnl['net_pnl']:,.0f}, "
                     f"win rate {hasil_pnl['win_rate']:.1f}% ({hasil_pnl['menang']}W/{hasil_pnl['kalah']}L)")
             else:
-                log(f"❌ {nama} — net PnL ${hasil_pnl['net_pnl']:,.0f}, "
+                log(f"SKIP {nama} — net PnL ${hasil_pnl['net_pnl']:,.0f}, "
                     f"win rate {hasil_pnl['win_rate']:.1f}% (gak lolos threshold)")
 
     if gagal_pnl:
-        log(f"⚠️  {gagal_pnl} trader gagal di-cek PnL (error/rate-limit), dilewatin.")
+        log(f"WARNING {gagal_pnl} trader gagal di-cek PnL (error/rate-limit), dilewatin.")
 
     if SINGLE_TRADER_MODE:
         # buat single-trader, konsistensi (win_rate) lebih penting dari total $ (net_pnl bisa
@@ -250,14 +257,14 @@ def auto_pilih_trader():
     terpilih = terpilih_pnl[:JUMLAH_TRADER]
 
     if not terpilih:
-        log("⚠️  Gak ada trader yang lolos validasi net PnL. "
+        log("WARNING Gak ada trader yang lolos validasi net PnL. "
             "Fallback ke hasil tahap 1 (redeem-based) biar bot tetep jalan.")
         terpilih_fallback = kandidat_untuk_pnl[:JUMLAH_TRADER]
         for t in terpilih_fallback:
             log(f"   [fallback] {t['nama']} — {t['total_redeem']} redeem, ${t['nilai_redeem']:,.0f}")
         return [t["wallet"] for t in terpilih_fallback]
 
-    log(f"✅ {len(terpilih)} trader FINAL terpilih (net PnL validated):")
+    log(f"{len(terpilih)} trader FINAL terpilih (net PnL validated):")
     for t in terpilih:
         log(f"   {t['nama']} — net PnL ${t['net_pnl']:,.0f}, win rate {t['win_rate']:.1f}%, "
             f"{t['total_closed']} closed positions")
@@ -275,7 +282,7 @@ def fetch_posisi(wallet):
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        log(f"❌ Gagal fetch posisi {wallet[:10]}...: {e}")
+        log(f"ERROR Gagal fetch posisi {wallet[:10]}...: {e}")
         return None
 
 
@@ -456,7 +463,7 @@ def get_performa_wallets(wallets):
                 performa_cache[w] = {"data": perf, "waktu": sekarang}
             elif cached:
                 # fetch gagal tapi ada data lama -> mending pakai yang lama daripada kosong
-                log(f"⚠️  Gagal refresh performa {w[:10]}..., pakai cache lama")
+                log(f"WARNING Gagal refresh performa {w[:10]}..., pakai cache lama")
             else:
                 continue
 
@@ -490,7 +497,7 @@ def get_performa_pnl_wallets(wallets):
             if perf:
                 performa_pnl_cache[w] = {"data": perf, "waktu": sekarang}
             elif cached:
-                log(f"⚠️  Gagal refresh net PnL {w[:10]}..., pakai cache lama")
+                log(f"WARNING Gagal refresh net PnL {w[:10]}..., pakai cache lama")
             else:
                 continue
 
@@ -529,8 +536,8 @@ def eksekusi_single_trader(sinyal):
     """
     global loss_sekarang
 
-    log(f"🚨 Posisi baru dari trader yang di-copy ({sinyal['wallet'][:10]}...)")
-    log(f"   Market: {sinyal['title'][:50]} → '{sinyal['outcome']}'")
+    log(f"Posisi baru dari trader yang di-copy ({sinyal['wallet'][:10]}...)")
+    log(f"   Market: {sinyal['title'][:50]} -> '{sinyal['outcome']}'")
 
     # pake data net PnL yang udah divalidasi tahap 2 (bukan redeem-count doang),
     # kalo gak ada (misal MANUAL mode / belum sempet di-scan), fallback ke None
@@ -539,7 +546,7 @@ def eksekusi_single_trader(sinyal):
     if MODE_KEPUTUSAN == "HYBRID":
         skor = skor_single_trader(performa_pnl)
         keputusan = keputusan_dari_skor(skor, MIN_AI_CONFIDENCE)
-        log(f"🧮 Skor formula: {skor}/10 -> {keputusan}")
+        log(f"Skor formula: {skor}/10 -> {keputusan}")
 
         deskripsi_sinyal = f"Market: {sinyal['title']}\nOutcome: {sinyal['outcome']}"
         deskripsi_performa = (
@@ -553,7 +560,7 @@ def eksekusi_single_trader(sinyal):
         hasil_ai = {"keputusan": keputusan, "confidence": skor, "alasan": alasan}
         print_analisis_single_trader(sinyal, hasil_ai)
     else:
-        log("🤖 Minta analisis AI (single-trader, bukan consensus)...")
+        log("Minta analisis AI (single-trader, bukan consensus)...")
         hasil_ai = analisis_single_trader(sinyal, performa_pnl)
         print_analisis_single_trader(sinyal, hasil_ai)
 
@@ -580,7 +587,7 @@ def eksekusi_single_trader(sinyal):
         )
 
         if fraksi_kelly <= 0:
-            log(f"⛔ Kelly Criterion: harga ${harga_sekarang if harga_sekarang else '?'} "
+            log(f"Kelly Criterion: harga ${harga_sekarang if harga_sekarang else '?'} "
                 f"gak ngasih edge yang cukup, SKIP walau skor formula {confidence}/10")
             catat_ke_report({
                 "mode": "SINGLE_TRADER", "market": sinyal["title"], "market_id": sinyal["market_id"],
@@ -594,14 +601,14 @@ def eksekusi_single_trader(sinyal):
 
         multiplier = hitung_multiplier_streak()
         bet_amount = round(MAX_PER_TRADE * fraksi_kelly * multiplier, 2)
-        log(f"   🎲 Kelly fraction: {fraksi_kelly:.3f} (harga ${harga_sekarang:.3f}, "
+        log(f"   Kelly fraction: {fraksi_kelly:.3f} (harga ${harga_sekarang:.3f}, "
             f"win rate {performa_pnl.get('win_rate', 0):.1f}%)")
         if multiplier != 1.0:
-            log(f"   📊 Dynamic sizing: ×{multiplier:.2f} (berdasarkan streak terakhir)")
+            log(f"   Dynamic sizing: x{multiplier:.2f} (berdasarkan streak terakhir)")
         boleh, alasan = cek_boleh_bet(bet_amount)
 
         if not boleh:
-            log(f"⛔ {alasan}")
+            log(f"{alasan}")
             catat_ke_report({
                 "mode": "SINGLE_TRADER", "market": sinyal["title"], "market_id": sinyal["market_id"],
                 "outcome": sinyal["outcome"], "wallet": sinyal["wallet"], "jumlah_trader": 1,
@@ -612,12 +619,12 @@ def eksekusi_single_trader(sinyal):
             return
 
         loss_sekarang += bet_amount
-        log(f"✅ BET ${bet_amount} (confidence {confidence}/10 → {confidence*10}% dari max "
+        log(f"BET ${bet_amount} (confidence {confidence}/10 -> {confidence*10}% dari max "
             f"${MAX_PER_TRADE}) pada '{sinyal['outcome']}'")
         log(f"   Budget terpakai: ${loss_sekarang:.2f} / ${MAX_LOSS}")
 
         if SIMULASI_MODE:
-            log(f"   [PAPER] Order dicatat ✏️")
+            log(f"   [PAPER] Order dicatat")
             status_final = "paper"
         else:
             hasil_order = place_market_buy(
@@ -628,14 +635,14 @@ def eksekusi_single_trader(sinyal):
             )
             status = hasil_order.get("status", "unknown")
             if status == "success":
-                log(f"   ✅ Order LIVE berhasil dikirim.")
+                log(f"   Order LIVE berhasil dikirim.")
                 status_final = "live_success"
             elif status == "dry_run":
-                log(f"   🟡 Order gak beneran dikirim (LIVE_TRADING_ENABLED masih False "
+                log(f"   Order gak beneran dikirim (LIVE_TRADING_ENABLED masih False "
                     f"di order_executor.py).")
                 status_final = "dry_run"
             else:
-                log(f"   ❌ Order gagal: {hasil_order.get('alasan', 'unknown error')}")
+                log(f"   Order gagal: {hasil_order.get('alasan', 'unknown error')}")
                 loss_sekarang -= bet_amount
                 status_final = f"gagal: {hasil_order.get('alasan', 'unknown error')}"
 
@@ -648,7 +655,7 @@ def eksekusi_single_trader(sinyal):
             "budget_terpakai": loss_sekarang,
         })
     else:
-        log(f"❌ SKIP — AI confidence {confidence}/10 (butuh ≥{MIN_AI_CONFIDENCE})")
+        log(f"SKIP — AI confidence {confidence}/10 (butuh >={MIN_AI_CONFIDENCE})")
         catat_ke_report({
             "mode": "SINGLE_TRADER", "market": sinyal["title"], "market_id": sinyal["market_id"],
             "outcome": sinyal["outcome"], "wallet": sinyal["wallet"], "jumlah_trader": 1,
@@ -661,7 +668,7 @@ def eksekusi_single_trader(sinyal):
 def eksekusi_consensus(sinyal):
     global loss_sekarang
 
-    log(f"🚨 Consensus terdeteksi: {sinyal['jumlah_trader']} trader sepakat")
+    log(f"Consensus terdeteksi: {sinyal['jumlah_trader']} trader sepakat")
     log(f"   Market: {sinyal['title'][:50]}")
 
     performa_list = get_performa_pnl_wallets(sinyal["wallets"])
@@ -669,7 +676,7 @@ def eksekusi_consensus(sinyal):
     if MODE_KEPUTUSAN == "HYBRID":
         skor = skor_consensus(performa_list, sinyal["jumlah_trader"])
         keputusan = keputusan_dari_skor(skor, MIN_AI_CONFIDENCE)
-        log(f"🧮 Skor formula: {skor}/10 -> {keputusan}")
+        log(f"Skor formula: {skor}/10 -> {keputusan}")
 
         deskripsi_sinyal = (
             f"Market: {sinyal['title']}\nOutcome: {sinyal['outcome']}\n"
@@ -689,7 +696,7 @@ def eksekusi_consensus(sinyal):
         hasil_ai = {"keputusan": keputusan, "confidence": skor, "alasan": alasan}
         print_analisis_consensus(sinyal, hasil_ai)
     else:
-        log("🤖 Minta analisis AI...")
+        log("Minta analisis AI...")
         hasil_ai = analisis_consensus(sinyal, performa_list)
         print_analisis_consensus(sinyal, hasil_ai)
 
@@ -717,7 +724,7 @@ def eksekusi_consensus(sinyal):
         fraksi_kelly = kelly_fraction(win_rate_dipake, harga_sekarang)
 
         if fraksi_kelly <= 0:
-            log(f"⛔ Kelly Criterion: harga ${harga_sekarang if harga_sekarang else '?'} "
+            log(f"Kelly Criterion: harga ${harga_sekarang if harga_sekarang else '?'} "
                 f"gak ngasih edge yang cukup, SKIP walau skor formula {confidence}/10")
             catat_ke_report({
                 "mode": "CONSENSUS", "market": sinyal["title"], "market_id": sinyal["market_id"],
@@ -731,14 +738,14 @@ def eksekusi_consensus(sinyal):
 
         multiplier = hitung_multiplier_streak()
         bet_amount = round(MAX_PER_TRADE * fraksi_kelly * multiplier, 2)
-        log(f"   🎲 Kelly fraction: {fraksi_kelly:.3f} (harga ${harga_sekarang:.3f}, "
+        log(f"   Kelly fraction: {fraksi_kelly:.3f} (harga ${harga_sekarang:.3f}, "
             f"win rate terendah {win_rate_dipake:.1f}%)")
         if multiplier != 1.0:
-            log(f"   📊 Dynamic sizing: ×{multiplier:.2f} (berdasarkan streak terakhir)")
+            log(f"   Dynamic sizing: x{multiplier:.2f} (berdasarkan streak terakhir)")
         boleh, alasan = cek_boleh_bet(bet_amount)
 
         if not boleh:
-            log(f"⛔ {alasan}")
+            log(f"{alasan}")
             catat_ke_report({
                 "mode": "CONSENSUS", "market": sinyal["title"], "market_id": sinyal["market_id"],
                 "outcome": sinyal["outcome"], "wallet": ", ".join(sinyal.get("wallets", [])),
@@ -749,11 +756,11 @@ def eksekusi_consensus(sinyal):
             return
 
         loss_sekarang += bet_amount
-        log(f"✅ BET ${bet_amount} pada '{sinyal['outcome']}'")
+        log(f"BET ${bet_amount} pada '{sinyal['outcome']}'")
         log(f"   Budget terpakai: ${loss_sekarang:.2f} / ${MAX_LOSS}")
 
         if SIMULASI_MODE:
-            log(f"   [PAPER] Order dicatat ✏️")
+            log(f"   [PAPER] Order dicatat")
             status_final = "paper"
         else:
             # dry_run=SIMULASI_MODE (False di sini) -- tapi order_executor PUNYA gate-nya
@@ -768,14 +775,14 @@ def eksekusi_consensus(sinyal):
             )
             status = hasil_order.get("status", "unknown")
             if status == "success":
-                log(f"   ✅ Order LIVE berhasil dikirim.")
+                log(f"   Order LIVE berhasil dikirim.")
                 status_final = "live_success"
             elif status == "dry_run":
-                log(f"   🟡 Order gak beneran dikirim (LIVE_TRADING_ENABLED masih False "
+                log(f"   Order gak beneran dikirim (LIVE_TRADING_ENABLED masih False "
                     f"di order_executor.py). Nyalain manual kalo emang siap live.")
                 status_final = "dry_run"
             else:
-                log(f"   ❌ Order gagal: {hasil_order.get('alasan', 'unknown error')}")
+                log(f"   Order gagal: {hasil_order.get('alasan', 'unknown error')}")
                 loss_sekarang -= bet_amount  # rollback, order gak beneran kejadian
                 status_final = f"gagal: {hasil_order.get('alasan', 'unknown error')}"
 
@@ -788,7 +795,7 @@ def eksekusi_consensus(sinyal):
             "budget_terpakai": loss_sekarang,
         })
     else:
-        log(f"❌ SKIP — AI confidence {confidence}/10 (butuh ≥{MIN_AI_CONFIDENCE})")
+        log(f"SKIP — AI confidence {confidence}/10 (butuh >={MIN_AI_CONFIDENCE})")
         catat_ke_report({
             "mode": "CONSENSUS", "market": sinyal["title"], "market_id": sinyal["market_id"],
             "outcome": sinyal["outcome"], "wallet": ", ".join(sinyal.get("wallets", [])),
@@ -804,7 +811,7 @@ def print_summary():
     n_skip = sum(1 for c in riwayat_consensus if c["keputusan"] == "SKIP")
 
     print(f"\n{'='*60}")
-    print(f"📊 AUTO MULTI-TRADER SUMMARY — {datetime.now().strftime('%H:%M:%S')}")
+    print(f"AUTO MULTI-TRADER SUMMARY — {datetime.now().strftime('%H:%M:%S')}")
     print(f"{'='*60}")
     print(f"Trader dimonitor : {len(daftar_trader_aktif)} (auto-selected)")
     if SINGLE_TRADER_MODE:
@@ -814,13 +821,13 @@ def print_summary():
     print(f"Sisa budget      : ${sisa:.2f} / ${BUDGET_SAYA}")
     print(f"Sinyal difilter  : {jumlah_sinyal_difilter} (resolve/kejauhan/high-variance, gak sampe AI)")
     print(f"Total sinyal     : {len(riwayat_consensus)} (yang sampe ke AI)")
-    print(f"✅ IKUT          : {n_ikut}")
-    print(f"❌ SKIP          : {n_skip}")
+    print(f"IKUT             : {n_ikut}")
+    print(f"SKIP             : {n_skip}")
     if riwayat_consensus:
         print(f"\n5 Sinyal Terakhir:")
         for c in riwayat_consensus[-5:]:
             print(f"  [{c['waktu']}] {c['market'][:40]}")
-            print(f"     → {c['outcome']} | {c['jumlah_trader']} trader | "
+            print(f"     -> {c['outcome']} | {c['jumlah_trader']} trader | "
                   f"AI: {c['keputusan']} ({c['confidence']}/10)")
     print(f"{'='*60}\n")
 
@@ -831,7 +838,7 @@ def main():
     global last_rescan_time, daftar_trader_aktif
 
     print(f"\n{'='*60}")
-    print(f"  🤖 AUTO MULTI-TRADER + AI CONSENSUS BOT")
+    print(f"  AUTO MULTI-TRADER + AI CONSENSUS BOT")
     print(f"{'='*60}")
     log(f"Mode trader       : {'AUTO (dari leaderboard)' if AUTO_PILIH_TRADER else 'MANUAL'}")
     if SINGLE_TRADER_MODE:
@@ -840,9 +847,9 @@ def main():
         log(f"Min consensus     : {MIN_CONSENSUS} trader harus searah")
     log(f"Min AI confidence : {MIN_AI_CONFIDENCE}/10")
     log(f"Modal: ${BUDGET_SAYA} | Max/trade: ${MAX_PER_TRADE} | Stop loss: ${MAX_LOSS}")
-    log(f"Mode: {'SIMULASI 🟡' if SIMULASI_MODE else 'LIVE 🔴'}")
+    log(f"Mode: {'SIMULASI' if SIMULASI_MODE else 'LIVE'}")
     if TEST_MODE_SKIP_FILTER:
-        log("⚠️  TEST_MODE_SKIP_FILTER AKTIF — filter resolve/kejauhan/high-variance DIMATIIN. "
+        log("WARNING TEST_MODE_SKIP_FILTER AKTIF — filter resolve/kejauhan/high-variance DIMATIIN. "
             "Ini buat testing doang, balikin ke False abis selesai!")
     print(f"{'='*60}\n")
 
@@ -852,45 +859,45 @@ def main():
         daftar_trader_aktif = DAFTAR_TRADER_MANUAL
 
     if SINGLE_TRADER_MODE and len(daftar_trader_aktif) > 1:
-        log(f"ℹ️  SINGLE_TRADER_MODE aktif — ambil cuma trader teratas dari "
+        log(f"SINGLE_TRADER_MODE aktif — ambil cuma trader teratas dari "
             f"{len(daftar_trader_aktif)} kandidat.")
         daftar_trader_aktif = daftar_trader_aktif[:1]
 
     if not daftar_trader_aktif:
-        log("❌ Tidak ada trader yang bisa dimonitor. Bot berhenti.")
+        log("ERROR Tidak ada trader yang bisa dimonitor. Bot berhenti.")
         return
 
     if SINGLE_TRADER_MODE:
-        log(f"👤 Trader yang di-copy: {daftar_trader_aktif[0]}")
+        log(f"Trader yang di-copy: {daftar_trader_aktif[0]}")
 
     last_summary_time = time.time()
     last_rescan_time = time.time()
 
     while True:
         if loss_sekarang >= MAX_LOSS:
-            log("🛑 STOP LOSS GLOBAL — Bot berhenti.")
+            log("STOP LOSS GLOBAL — Bot berhenti.")
             print_summary()
             break
 
         if (not sudah_soft_pause) and loss_sekarang >= MAX_LOSS * PAUSE_THRESHOLD_PCT:
             sudah_soft_pause = True
-            log(f"⏸️  SOFT PAUSE — udah kepake {PAUSE_THRESHOLD_PCT*100:.0f}% dari MAX_LOSS "
+            log(f"SOFT PAUSE — udah kepake {PAUSE_THRESHOLD_PCT*100:.0f}% dari MAX_LOSS "
                 f"(${loss_sekarang:.2f}/${MAX_LOSS}). Istirahat {PAUSE_DURASI_MENIT} menit "
                 f"sebelum lanjut lagi (bukan stop total, cuma jeda).")
             time.sleep(PAUSE_DURASI_MENIT * 60)
-            log("▶️  Lanjut lagi setelah soft pause.")
+            log("Lanjut lagi setelah soft pause.")
             continue
 
         if AUTO_PILIH_TRADER:
             sekarang_rescan = time.time()
             if sekarang_rescan - last_rescan_time >= RESCAN_INTERVAL * 60:
-                log("🔄 Waktunya re-scan leaderboard untuk update daftar trader...")
+                log("Waktunya re-scan leaderboard untuk update daftar trader...")
                 daftar_trader_aktif = auto_pilih_trader()
                 if SINGLE_TRADER_MODE and len(daftar_trader_aktif) > 1:
                     daftar_trader_aktif = daftar_trader_aktif[:1]
                 last_rescan_time = sekarang_rescan
 
-        log(f"🔍 Mengecek posisi {len(daftar_trader_aktif)} trader...")
+        log(f"Mengecek posisi {len(daftar_trader_aktif)} trader...")
         for wallet in daftar_trader_aktif:
             data = fetch_posisi(wallet)
             if data:
@@ -899,52 +906,52 @@ def main():
                 posisi_per_trader[wallet] = parse_posisi(data)
 
         if is_first_run:
-            log("📸 Snapshot awal selesai, mulai cek sinyal mulai sekarang...")
+            log("Snapshot awal selesai, mulai cek sinyal mulai sekarang...")
             is_first_run = False
         elif SINGLE_TRADER_MODE:
             wallet = daftar_trader_aktif[0]
             sinyal_list = cek_posisi_baru(wallet)
             if sinyal_list:
-                log(f"🚨 {len(sinyal_list)} posisi baru dari trader yang di-copy!")
+                log(f"{len(sinyal_list)} posisi baru dari trader yang di-copy!")
                 for sinyal in sinyal_list:
                     if (not TEST_MODE_SKIP_FILTER) and is_market_high_variance(sinyal["title"]):
-                        log(f"⏭️  SKIP otomatis (high-variance market): {sinyal['title'][:50]}")
+                        log(f"SKIP otomatis (high-variance market): {sinyal['title'][:50]}")
                         jumlah_sinyal_difilter += 1
                         continue
                     if (not TEST_MODE_SKIP_FILTER) and is_market_sudah_resolve(sinyal["market_id"], sinyal["outcome"]):
-                        log(f"⏭️  SKIP otomatis (market udah resolve, gak relevan lagi): "
+                        log(f"SKIP otomatis (market udah resolve, gak relevan lagi): "
                             f"{sinyal['title'][:50]}")
                         jumlah_sinyal_difilter += 1
                         continue
                     if (not TEST_MODE_SKIP_FILTER) and is_market_terlalu_jauh(sinyal["market_id"]):
-                        log(f"⏭️  SKIP otomatis (resolve >{MAX_HARI_KE_RESOLVE} hari lagi): "
+                        log(f"SKIP otomatis (resolve >{MAX_HARI_KE_RESOLVE} hari lagi): "
                             f"{sinyal['title'][:50]}")
                         jumlah_sinyal_difilter += 1
                         continue
                     eksekusi_single_trader(sinyal)
             else:
-                log("✅ Gak ada posisi baru dari trader ini saat ini")
+                log("Gak ada posisi baru dari trader ini saat ini")
         else:
             sinyal_list = cek_consensus()
             if sinyal_list:
-                log(f"🚨 {len(sinyal_list)} consensus signal ditemukan!")
+                log(f"{len(sinyal_list)} consensus signal ditemukan!")
                 for sinyal in sinyal_list:
                     kunci = (sinyal["market_id"], sinyal["outcome"])
                     if kunci in sinyal_sudah_dievaluasi:
                         continue  # udah pernah dievaluasi, gak usah tanya AI lagi
                     if (not TEST_MODE_SKIP_FILTER) and is_market_high_variance(sinyal["title"]):
-                        log(f"⏭️  SKIP otomatis (high-variance market): {sinyal['title'][:50]}")
+                        log(f"SKIP otomatis (high-variance market): {sinyal['title'][:50]}")
                         sinyal_sudah_dievaluasi.add(kunci)
                         jumlah_sinyal_difilter += 1
                         continue
                     if (not TEST_MODE_SKIP_FILTER) and is_market_sudah_resolve(sinyal["market_id"], sinyal["outcome"]):
-                        log(f"⏭️  SKIP otomatis (market udah resolve, gak relevan lagi): "
+                        log(f"SKIP otomatis (market udah resolve, gak relevan lagi): "
                             f"{sinyal['title'][:50]}")
                         sinyal_sudah_dievaluasi.add(kunci)
                         jumlah_sinyal_difilter += 1
                         continue
                     if (not TEST_MODE_SKIP_FILTER) and is_market_terlalu_jauh(sinyal["market_id"]):
-                        log(f"⏭️  SKIP otomatis (resolve >{MAX_HARI_KE_RESOLVE} hari lagi): "
+                        log(f"SKIP otomatis (resolve >{MAX_HARI_KE_RESOLVE} hari lagi): "
                             f"{sinyal['title'][:50]}")
                         sinyal_sudah_dievaluasi.add(kunci)
                         jumlah_sinyal_difilter += 1
@@ -952,14 +959,14 @@ def main():
                     eksekusi_consensus(sinyal)
                     sinyal_sudah_dievaluasi.add(kunci)
             else:
-                log("✅ Tidak ada consensus signal saat ini")
+                log("Tidak ada consensus signal saat ini")
 
         sekarang = time.time()
         if sekarang - last_summary_time >= SUMMARY_INTERVAL * 60:
             print_summary()
             last_summary_time = sekarang
     
-        log(f"💤 Tunggu {CHECK_INTERVAL} detik...\n")
+        log(f"Tunggu {CHECK_INTERVAL} detik...\n")
         time.sleep(CHECK_INTERVAL)
 
 
